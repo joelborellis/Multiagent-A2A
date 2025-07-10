@@ -2,12 +2,16 @@ import logging
 from collections.abc import AsyncIterable
 from typing import Any
 
-from azure.identity.aio import DefaultAzureCredential
 from dotenv import load_dotenv
 from pydantic import BaseModel
-from semantic_kernel.agents import AzureAIAgent, AzureAIAgentSettings
-from semantic_kernel.connectors.mcp import MCPSsePlugin
-# from semantic_kernel.contents import ChatMessageContent
+
+from agents.mcp import (
+    MCPServerStreamableHttp,
+)
+
+from agents import Agent, Runner
+
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +23,7 @@ load_dotenv()
 class ResponseFormat(BaseModel):
     """A Response Format model to direct how the model should respond."""
 
-    status: str = 'input_required'
+    status: str = "input_required"
     message: str
 
 
@@ -33,47 +37,33 @@ class SemanticKernelMCPAgent:
 
     def __init__(self):
         self.agent = None
+        self.server = None
         self.thread = None
         self.client = None
         self.credential = None
         self.plugin = None
 
     async def initialize(self, mcp_url: str = "http://localhost:8000/sse"):
-        """Initialize the agent with Azure credentials and MCP plugin."""
+        """Initialize the agent with MCP Streamable."""
         try:
-            # Create Azure credential
-            self.credential = DefaultAzureCredential()
-            
-            # Create Azure AI client
-            self.client = AzureAIAgent.create_client(credential=self.credential)
-            
-            # Create the MCP plugin
-            self.plugin = MCPSsePlugin(
-                name="SportsNews",
-                url=mcp_url,
-            )
-            
-            # Initialize the plugin
-            await self.plugin.__aenter__()
-            
-            # Create agent definition
-            agent_definition = await self.client.agents.create_agent(
-                model=AzureAIAgentSettings().model_deployment_name,
-                name="SportsNewsAssistant",
-                instructions="You are a helpful assistant that can generate sports news through the use of different tools.",
+            self.server = MCPServerStreamableHttp(
+                name="StreamableHttp Container App Server",
+                params={
+                    "url": mcp_url,
+                    "headers": {"x-api-key": os.environ.get("MCP_API_KEY")},
+                },
             )
 
-            # Create the agent with MCP plugin
-            self.agent = AzureAIAgent(
-                client=self.client,
-                definition=agent_definition,
-                plugins=[self.plugin],
+            self.agent = Agent(
+                name="Sports Results Agent",
+                instructions="You are a helpful agent that searches the web for sports results.",
+                mcp_servers=[self.server],
             )
-            
-            logger.info("MCP Agent initialized successfully")
-            
+
+            logger.info("OpenAI Agent initialized successfully")
+
         except Exception as e:
-            logger.error(f"Failed to initialize MCP Agent: {e}")
+            logger.error(f"Failed to initialize OpenAI Agent: {e}")
             await self.cleanup()
             raise
 
@@ -89,32 +79,27 @@ class SemanticKernelMCPAgent:
         """
         if not self.agent:
             return {
-                'is_task_complete': False,
-                'require_user_input': True,
-                'content': 'Agent not initialized. Please call initialize() first.',
+                "is_task_complete": False,
+                "require_user_input": True,
+                "content": "Agent not initialized. Please call initialize() first.",
             }
 
         try:
-            responses = []
-            async for response in self.agent.invoke(
-                messages=user_input,
-                thread=self.thread,
-            ):
-                responses.append(str(response))
-                self.thread = response.thread
 
-            content = "\n".join(responses) if responses else "No response received."
-            
+            result = await Runner.run(
+                self.agent,
+                user_input,
+            )
             return {
-                'is_task_complete': True,
-                'require_user_input': False,
-                'content': content,
+                "is_task_complete": True,
+                "require_user_input": False,
+                "content": result.final_output,
             }
         except Exception as e:
             return {
-                'is_task_complete': False,
-                'require_user_input': True,
-                'content': f'Error processing request: {str(e)}',
+                "is_task_complete": False,
+                "require_user_input": True,
+                "content": f"Error processing request: {str(e)}",
             }
 
     async def stream(
@@ -133,76 +118,54 @@ class SemanticKernelMCPAgent:
         """
         if not self.agent:
             yield {
-                'is_task_complete': False,
-                'require_user_input': True,
-                'content': 'Agent not initialized. Please call initialize() first.',
+                "is_task_complete": False,
+                "require_user_input": True,
+                "content": "Agent not initialized. Please call initialize() first.",
             }
             return
 
         try:
-            async for response in self.agent.invoke(
-                messages=user_input,
-                thread=self.thread,
-            ):
-                self.thread = response.thread
-                yield {
-                    'is_task_complete': False,
-                    'require_user_input': False,
-                    'content': str(response),
-                }
-            
+            # Use the stream_events() method to get async iterable events
+            stream_result = Runner.run_streamed(
+                self.agent,
+                user_input,
+            )
+
+            async for event in stream_result.stream_events():
+                # Look for ResponseTextDeltaEvent in raw_response_event
+                if (
+                    hasattr(event, "type")
+                    and event.type == "raw_response_event"
+                    and hasattr(event, "data")
+                ):
+
+                    data = event.data
+                    data_type = type(data).__name__
+
+                    # Extract text delta from ResponseTextDeltaEvent
+                    if data_type == "ResponseTextDeltaEvent" and hasattr(data, "delta"):
+                        delta_text = data.delta
+                        if delta_text:  # Only yield if there's actual content
+                            yield {
+                                "is_task_complete": False,
+                                "require_user_input": False,
+                                "content": delta_text,
+                            }
+
             # Final completion message
             yield {
-                'is_task_complete': True,
-                'require_user_input': False,
-                'content': 'Task completed successfully.',
+                "is_task_complete": True,
+                "require_user_input": False,
+                "content": "Task completed successfully.",
             }
         except Exception as e:
             yield {
-                'is_task_complete': False,
-                'require_user_input': True,
-                'content': f'Error processing request: {str(e)}',
+                "is_task_complete": False,
+                "require_user_input": True,
+                "content": f"Error processing request: {str(e)}",
             }
 
     async def cleanup(self):
         """Cleanup resources."""
-        try:
-            if self.thread:
-                await self.thread.delete()
-                self.thread = None
-                logger.info("Thread deleted successfully")
-        except Exception as e:
-            logger.error(f"Error deleting thread: {e}")
-        
-        try:
-            if self.agent and self.client:
-                await self.client.agents.delete_agent(self.agent.id)
-                logger.info("Agent deleted successfully")
-        except Exception as e:
-            logger.error(f"Error deleting agent: {e}")
-        
-        try:
-            if self.plugin:
-                await self.plugin.__aexit__(None, None, None)
-                self.plugin = None
-                logger.info("MCP plugin cleaned up successfully")
-        except Exception as e:
-            logger.error(f"Error cleaning up MCP plugin: {e}")
-        
-        try:
-            if self.client:
-                await self.client.close()
-                self.client = None
-                logger.info("Client closed successfully")
-        except Exception as e:
-            logger.error(f"Error closing client: {e}")
-        
-        try:
-            if self.credential:
-                await self.credential.close()
-                self.credential = None
-                logger.info("Credential closed successfully")
-        except Exception as e:
-            logger.error(f"Error closing credential: {e}")
         
         self.agent = None

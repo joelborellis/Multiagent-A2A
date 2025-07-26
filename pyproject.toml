@@ -7,7 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "a2a-sdk>=0.2.9",
     "asyncclick>=8.1.8",
-    "azure-ai-agents>=1.0.1",
+    "azure-ai-agents>=1.0.2",
     "azure-ai-projects>=1.0.0b12",
     "azure-identity>=1.23.0",
     "bs4>=0.0.2",

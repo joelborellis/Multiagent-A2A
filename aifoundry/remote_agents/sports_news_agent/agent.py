@@ -6,8 +6,7 @@ from azure.identity.aio import DefaultAzureCredential
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from semantic_kernel.agents import AzureAIAgent, AzureAIAgentSettings
-from semantic_kernel.connectors.mcp import MCPSsePlugin
-# from semantic_kernel.contents import ChatMessageContent
+from semantic_kernel.connectors.mcp import MCPStreamableHttpPlugin
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,7 @@ class SemanticKernelMCPAgent:
         self.credential = None
         self.plugin = None
 
-    async def initialize(self, mcp_url: str = "http://localhost:8000/sse"):
+    async def initialize(self, mcp_url: str = "http://localhost:8000/mcp"):
         """Initialize the agent with Azure credentials and MCP plugin."""
         try:
             # Create Azure credential
@@ -48,7 +47,13 @@ class SemanticKernelMCPAgent:
             self.client = AzureAIAgent.create_client(credential=self.credential)
             
             # Create the MCP plugin
-            self.plugin = MCPSsePlugin(
+            #self.plugin = MCPSsePlugin(
+            #    name="SportsNews",
+            #    url=mcp_url,
+            #)
+            
+            # Create the MCP plugin
+            self.plugin = MCPStreamableHttpPlugin(
                 name="SportsNews",
                 url=mcp_url,
             )

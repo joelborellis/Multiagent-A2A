@@ -92,13 +92,26 @@ class RoutingAgent:
         self.context = AzureAgentContext()
         
         # Initialize Azure AI Agents client with application credentials
-        credential = self._get_azure_credential()
-        self.agents_client = AgentsClient(
-            endpoint=os.environ["AZURE_AI_AGENT_ENDPOINT"],
-            credential=credential,
-        )
+        self._agents_client = None
         self.azure_agent = None
         self.current_thread = None
+        self._initialized = False
+
+    @property
+    def agents_client(self) -> AgentsClient:
+        """Lazy initialization of Azure AI Agents client."""
+        if self._agents_client is None:
+            credential = self._get_azure_credential()
+            self._agents_client = AgentsClient(
+                endpoint=os.environ["AZURE_AI_AGENT_ENDPOINT"],
+                credential=credential,
+            )
+        return self._agents_client
+
+    @property
+    def is_initialized(self) -> bool:
+        """Check if the agent is fully initialized."""
+        return self._initialized and self.azure_agent is not None
 
     async def _async_init_components(
         self, remote_agent_addresses: list[str]
@@ -127,13 +140,14 @@ class RoutingAgent:
                 except Exception as e:  # Catch other potential errors
                     print(
                         f'ERROR: Failed to initialize connection for {address}: {e}'
-                    )
-
-        # Populate self.agents using the logic from original __init__ (via list_remote_agents)
+                    )        # Populate self.agents using the logic from original __init__ (via list_remote_agents)
         agent_info = []
         for agent_detail_dict in self.list_remote_agents():
             agent_info.append(json.dumps(agent_detail_dict))
         self.agents = '\n'.join(agent_info)
+        
+        # Mark as initialized after successful setup
+        self._initialized = True
 
     @classmethod
     async def create(
@@ -189,7 +203,7 @@ class RoutingAgent:
                 instructions=instructions,
                 tools=tools
             )
-            print(f"Created Azure AI agent, agent ID: {self.azure_agent.id}")
+            print(f"Created Azure AI agent: {self.azure_agent.name} - {self.azure_agent.id}")
             
             # Create a thread for conversation
             self.current_thread = self.agents_client.threads.create()
@@ -263,7 +277,7 @@ Always be helpful and route requests to the most appropriate agent."""
         Args:
             agent_name: The name of the agent to send the task to.
             task: The comprehensive conversation context summary
-                and goal to be achieved regarding user inquiry and purchase request.
+                and goal to be achieved regarding user inquiry.
 
         Returns:
             A Task object from the remote agent response.
@@ -316,7 +330,7 @@ Always be helpful and route requests to the most appropriate agent."""
         send_response: SendMessageResponse = await client.send_message(
             message_request=message_request
         )
-        print('send_response', send_response.model_dump_json(exclude_none=True, indent=2))
+        #print('send_response', send_response.model_dump_json(exclude_none=True, indent=2))
 
         if not isinstance(send_response.root, SendMessageSuccessResponse):
             print('received non-success response. Aborting get task ')
@@ -330,15 +344,15 @@ Always be helpful and route requests to the most appropriate agent."""
 
     async def process_user_message(self, user_message: str) -> str:
         """Process a user message through Azure AI Agent and return the response."""
-        if not hasattr(self, 'azure_agent') or not self.azure_agent:
-            return "Azure AI Agent not initialized. Please ensure the agent is properly created."
+        if not self.is_initialized:
+            return "Azure AI Agent not fully initialized. Please ensure the agent is properly created."
         
-        if not hasattr(self, 'current_thread') or not self.current_thread:
+        if not self.current_thread:
             return "Azure AI Thread not initialized. Please ensure the agent is properly created."
         
         try:
             # Initialize session if needed
-            self.initialize_session()
+            #self.initialize_session()
             
             print(f"Processing message: {user_message[:50]}...")
             
@@ -459,24 +473,26 @@ Always be helpful and route requests to the most appropriate agent."""
     def cleanup(self):
         """Clean up Azure AI agent resources."""
         try:
-            if hasattr(self, 'azure_agent') and self.azure_agent and hasattr(self, 'agents_client') and self.agents_client:
+            if self.azure_agent and self._agents_client:
                 self.agents_client.delete_agent(self.azure_agent.id)
                 print(f"Deleted Azure AI agent: {self.azure_agent.id}")
         except Exception as e:
             print(f"Error cleaning up agent: {e}")
         finally:
             # Close the client to clean up resources
-            if hasattr(self, 'agents_client') and self.agents_client:
+            if self._agents_client:
                 try:
-                    self.agents_client.close()
+                    self._agents_client.close()
                     print("Azure AI client closed")
                 except Exception as e:
                     print(f"Error closing client: {e}")
+                finally:
+                    self._agents_client = None
             
-            if hasattr(self, 'azure_agent'):
-                self.azure_agent = None
-            if hasattr(self, 'current_thread'):
-                self.current_thread = None
+            # Reset all state
+            self.azure_agent = None
+            self.current_thread = None
+            self._initialized = False
 
     def __del__(self):
         """Destructor to ensure cleanup."""
@@ -499,31 +515,5 @@ Always be helpful and route requests to the most appropriate agent."""
             print("Using DefaultAzureCredential authentication")
             return DefaultAzureCredential()
 
-def _get_initialized_routing_agent_sync() -> RoutingAgent:
-    """Synchronously creates and initializes the RoutingAgent."""
-
-    async def _async_main() -> RoutingAgent:
-        routing_agent_instance = await RoutingAgent.create(
-            remote_agent_addresses=[
-                os.getenv('SPORTS_RESULTS_URL', 'http://localhost:10001'),
-                os.getenv('SPORTS_NEWS_URL', 'http://localhost:10002'),
-            ]
-        )
-        # Create the Azure AI agent
-        routing_agent_instance.create_agent()
-        return routing_agent_instance
-
-    try:
-        return asyncio.run(_async_main())
-    except RuntimeError as e:
-        if 'asyncio.run() cannot be called from a running event loop' in str(e):
-            print(
-                f'Warning: Could not initialize RoutingAgent with asyncio.run(): {e}. '
-                'This can happen if an event loop is already running (e.g., in Jupyter). '
-                'Consider initializing RoutingAgent within an async function in your application.'
-            )
-        raise
-
-
-# Initialize the routing agent
-routing_agent = _get_initialized_routing_agent_sync()
+# Note: Global instance creation removed for better practices.
+# Use RoutingAgent.create() in your application initialization instead.
